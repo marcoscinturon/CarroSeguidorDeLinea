@@ -1,0 +1,160 @@
+function __setObjectOrientation__(a,b,c)
+    -- compatibility routine, wrong results could be returned in some situations, in CoppeliaSim <4.0.1
+    if b==sim.handle_parent then
+        b=sim.getObjectParent(a)
+    end
+    if (b~=-1) and (sim.getObjectType(b)==sim.object_joint_type) and (sim.getInt32Parameter(sim.intparam_program_version)>=40001) then
+        a=a+sim.handleflag_reljointbaseframe
+    end
+    return sim.setObjectOrientation(a,b,c)
+end
+function __getObjectOrientation__(a,b)
+    -- compatibility routine, wrong results could be returned in some situations, in CoppeliaSim <4.0.1
+    if b==sim.handle_parent then
+        b=sim.getObjectParent(a)
+    end
+    if (b~=-1) and (sim.getObjectType(b)==sim.object_joint_type) and (sim.getInt32Parameter(sim.intparam_program_version)>=40001) then
+        a=a+sim.handleflag_reljointbaseframe
+    end
+    return sim.getObjectOrientation(a,b)
+end
+
+setLeds=function(elHandle,left,middle,right)
+    simSetUIButtonProperty(elHandle,8,sim.buttonproperty_staydown)
+    simSetUIButtonProperty(elHandle,16,sim.buttonproperty_staydown)
+    simSetUIButtonProperty(elHandle,24,sim.buttonproperty_staydown)
+    if (left) then
+        simSetUIButtonProperty(elHandle,8,sim.buttonproperty_staydown+sim.buttonproperty_isdown)
+    end
+    if (middle) then
+        simSetUIButtonProperty(elHandle,16,sim.buttonproperty_staydown+sim.buttonproperty_isdown)
+    end
+    if (right) then
+        simSetUIButtonProperty(elHandle,24,sim.buttonproperty_staydown+sim.buttonproperty_isdown)
+    end
+end
+
+function sysCall_threadmain()
+    -- Put some initialization code here:
+    display=simGetUIHandle("sensorDisplay")
+    setLeds(display,false,false,false)
+    objHandle=sim.getObjectAssociatedWithScript(sim.handle_self)
+    result,robotName=sim.getObjectName(objHandle)
+    simSetUIButtonLabel(display,0,robotName)
+    lineTracerBase=sim.getObjectHandle("LineTracerBase")
+    leftSensor=sim.getObjectHandle("LeftSensor")
+    middleSensor=sim.getObjectHandle("MiddleSensor")
+    rightSensor=sim.getObjectHandle("RightSensor")
+    leftJoint=sim.getObjectHandle("LeftJoint")
+    rightJoint=sim.getObjectHandle("RightJoint")
+    leftJointDynamic=sim.getObjectHandle("DynamicLeftJoint")
+    rightJointDynamic=sim.getObjectHandle("DynamicRightJoint")
+    nominalLinearVelocity=0.08
+    wheelRadius=0.027
+    interWheelDistance=0.119
+    initialVehicleZpos=sim.getObjectPosition(objHandle,sim.handle_parent)[3]
+    previousSimulationTime=sim.getSimulationTime()
+    stateChange=true --booleno para verificar si llega a una intersecci?n 
+    doSomething=false --booleno para verificar si se encuentra en una intersecci?n
+    count=0
+
+    -- We want next while-loop to be executed exactly once every main script pass, but since
+    -- this script runs in a thread, we explicitely switch threads at the end of the while-loop
+    -- Next instruction makes sure one full pass of the while-loop can be executed before switching threads:
+    sim.setThreadSwitchTiming(99)
+
+    while sim.getSimulationState()~=sim.simulation_advancing_abouttostop do
+        simulationTime=sim.getSimulationTime()
+        dt=simulationTime-previousSimulationTime
+        previousSimulationTime=simulationTime
+        state=sim.getSimulationState()
+
+        s=sim.getObjectSizeFactor(objHandle) -- in case we wanna scale the vehicle during simulation
+
+        -- Check the user interface:
+        b=simGetUIButtonProperty(display,4)
+        dyn=(sim.boolAnd32(b,sim.buttonproperty_isdown)==0)
+        if (dynamicSimulation==nil) or (dynamicSimulation~=dyn) then
+            dynamicSimulation=dyn
+            p=sim.boolOr32(sim.getModelProperty(objHandle),sim.modelproperty_not_dynamic)
+            if (dynamicSimulation) then
+                sim.setModelProperty(objHandle,p-sim.modelproperty_not_dynamic)
+            else
+                sim.setModelProperty(objHandle,p)
+                -- Make also sure the vahicle is flat on the ground:
+                p=sim.getObjectPosition(objHandle,sim.handle_parent)
+                o=__getObjectOrientation__(objHandle,sim.handle_parent)
+                p[3]=initialVehicleZpos
+                o[1]=0
+                o[2]=0
+                sim.setObjectPosition(objHandle,sim.handle_parent,p)
+                __setObjectOrientation__(objHandle,sim.handle_parent,o)
+            end
+        end
+
+        -- Read the sensors:
+        sensorReading={false,false,false}
+        sensorReading[1]=(sim.readVisionSensor(leftSensor)==1)
+        sensorReading[2]=(sim.readVisionSensor(middleSensor)==1)
+        sensorReading[3]=(sim.readVisionSensor(rightSensor)==1)
+
+        -- Set the sensor indicators:
+        setLeds(display,sensorReading[1],sensorReading[2],sensorReading[3])
+
+        -- Decide about left and right velocities:
+        linearVelocityLeft=nominalLinearVelocity*s
+        linearVelocityRight=nominalLinearVelocity*s
+        if (sensorReading[1]==false) then
+            linearVelocityLeft=linearVelocityLeft*0.3
+        end
+        if (sensorReading[3]==false) then
+            linearVelocityRight=linearVelocityRight*0.3
+        end
+
+        -- Now make it move!
+        if (sensorReading[1]==false and sensorReading[2]==false and sensorReading[3]==false) then --Se verifica si llega a una interseccion. Sucede cuando los tres sensores est?n sensando
+            doSomething=true 
+        end    
+        if (dynamicSimulation) then
+            sim.setJointTargetVelocity(leftJointDynamic,linearVelocityLeft/(s*wheelRadius))
+            sim.setJointTargetVelocity(rightJointDynamic,linearVelocityRight/(s*wheelRadius))
+            if (doSomething==true) then --Si esta en una interseccion entonces entra al if
+                if (stateChange==true) then --Para contar cada vez que pasa por una intersecion
+                    count=count+1
+                    print(count)
+                    stateChange=false --Se pone en falso para evitar que el contador siga sumando mientras este en la interseccion
+                end
+                if (count==4)then 
+                    sim.setJointTargetVelocity(leftJointDynamic,0)--Cuando esta en la intersecci?n 4, gira a la izquierda
+                end
+                if (count==5)then
+                    sim.setJointTargetVelocity(rightJointDynamic,0)--Cuando esta en la intersecci?n 5, gira a la derecha
+                end
+                if (count==6)then
+                    sim.setJointTargetVelocity(leftJointDynamic,0)--Cuando esta en la intersecci?n 6, gira a la izquierda
+                end
+                if (count==7)then
+                    sim.setJointTargetVelocity(leftJointDynamic,0.5)--Cuando esta en la intersecci?n 7, gira a la izquierda
+                end
+                if (count>=8 and count<=12)then
+                    sim.setJointTargetVelocity(leftJointDynamic,0)--Cuando esta al pie de la rampa, gira a la izquierda para subir
+                end
+                if ((sensorReading[1]==false and sensorReading[2]==false) or (sensorReading[2]==false and sensorReading[3]==false)) then
+                    doSomething=true --Asi alguno de los sensores deje de sensar, el carro debe seguir girar
+                else
+                    doSomething=false --Esto evita que se vuelva a entrar en el primer if. Si mas de un sensor deja de sensar, entonces es porque termino de girar.
+                    stateChange=true
+                end
+            end
+            if (count>=12 and count<=14) then
+                nominalLinearVelocity=0.3
+            end
+            if (count==14 and sensorReading[1]==true and sensorReading[2]==true and sensorReading[3]==true)then 
+                sim.setJointTargetVelocity(leftJointDynamic,0)--Si todos los sensores dejan de sensar, es porque el carro ha llegado al final de la pista.
+                sim.setJointTargetVelocity(rightJointDynamic,0)--Se pone la velocidad de ambas ruedas en 0
+            end
+        end
+
+        sim.switchThread() -- explicit thread switching: give control to other threads or the main thread
+    end
+end
